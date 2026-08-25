@@ -24,8 +24,6 @@ services:
       target: ${BUILD_TARGET:-main}
     command: /code/.venv/bin/taskiq worker app.adapters.tasks.worker:broker --workers 1
     env_file: ${APP_VOLUME_PATH:-.}/.env
-    ports:
-      - "${PROMETHEUS_WORKER_PORT:-9091}:9091"
     volumes:
       - ${APP_VOLUME_PATH:-/tmp}/worker-logs:/code/logs
     depends_on:
@@ -94,9 +92,8 @@ services:
   nginx:
     build:
       context: ./build/nginx
-    ports:
-      - "${APP_PORT}:80"
-      - "${PROMETHEUS_NGINX_PORT:-9145}:9145"
+    expose:
+      - '80'
     entrypoint: ["/entrypoint.sh"]
     env_file: ${APP_VOLUME_PATH:-.}/.env
     volumes:
