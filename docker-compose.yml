@@ -98,6 +98,11 @@ services:
     env_file: ${APP_VOLUME_PATH:-.}/.env
     volumes:
       - static_volume:/static
+    networks:
+      default:
+      coolify:
+        aliases:
+          - overfast-nginx
     depends_on:
       app:
         condition: service_healthy
@@ -235,3 +240,7 @@ volumes:
   pg-data:
   prometheus-data:
   grafana-data:
+
+networks:
+  coolify:
+    external: true
