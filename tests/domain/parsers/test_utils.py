@@ -4,6 +4,7 @@ from app.domain.parsers.utils import (
     extract_blizzard_id_from_url,
     is_blizzard_id,
     match_player_by_blizzard_id,
+    normalize_blizzard_id,
 )
 
 
@@ -94,6 +95,13 @@ class TestExtractBlizzardIdFromUrl:
 
         assert actual == expected
 
+    def test_normalizes_unescaped_pipe_from_redirect(self):
+        url = "/career/c85ba8c7e122ceffbf|2368c23b03198901169687dcb9896b9e/"
+
+        assert extract_blizzard_id_from_url(url) == (
+            "c85ba8c7e122ceffbf%7C2368c23b03198901169687dcb9896b9e"
+        )
+
     def test_complex_blizzard_id(self):
         """Should handle complex Blizzard ID formats"""
         url = "/career/a1b2c3d4e5f6%7Cg7h8i9j0k1l2m3n4o5p6/"
@@ -165,6 +173,14 @@ class TestMatchPlayerByBlizzardId:
         assert result is not None
         assert result["name"] == "Kindness"
         assert result["url"] == search_results[0]["url"]
+
+    def test_matches_encoded_redirect_against_unescaped_search_id(self):
+        encoded = "c85ba8c7e122ceffbf%7C2368c23b03198901169687dcb9896b9e"
+        unescaped = "c85ba8c7e122ceffbf|2368c23b03198901169687dcb9896b9e"
+        search_results = [{"name": "Zed", "url": unescaped, "isPublic": True}]
+
+        assert match_player_by_blizzard_id(search_results, encoded) is search_results[0]
+        assert normalize_blizzard_id(encoded) == normalize_blizzard_id(unescaped)
 
     def test_match_among_multiple_players(self):
         """Should match correct player among multiple results"""

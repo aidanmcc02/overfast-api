@@ -260,6 +260,34 @@ class TestGetFreshStoredProfile:
         assert age >= 0
 
 
+class TestResolveViaRedirect:
+    @pytest.mark.asyncio
+    async def test_zed_matches_encoded_redirect_to_unescaped_search_id(self):
+        svc = _make_service()
+        encoded = "c85ba8c7e122ceffbf%7C2368c23b03198901169687dcb9896b9e"
+        search_results = [
+            {"name": "Zed", "isPublic": True, "url": "other%7Cplayer"},
+            {
+                "name": "Zed",
+                "isPublic": True,
+                "url": "c85ba8c7e122ceffbf|2368c23b03198901169687dcb9896b9e",
+            },
+        ]
+
+        with patch(
+            "app.domain.services.player_service.fetch_player_html",
+            new_callable=AsyncMock,
+            return_value=("<html>unavailable</html>", encoded),
+        ):
+            identity = await svc._resolve_via_redirect(
+                "Zed-23526", "Zed-23526", search_results
+            )
+
+        assert identity.blizzard_id == encoded
+        assert identity.player_summary["url"] == search_results[1]["url"]
+        assert identity.battletag_input == "Zed-23526"
+
+
 # ---------------------------------------------------------------------------
 # _mark_player_unknown
 # ---------------------------------------------------------------------------
@@ -364,6 +392,25 @@ class TestHandlePlayerExceptions:
                 await svc._handle_player_exceptions(error, "TeKrop-2217", identity)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_search_match_with_unavailable_career_is_not_not_found(self):
+        cache = AsyncMock()
+        svc = _make_service(cache=cache)
+        error = ParserParsingError("Could not find main content in HTML")
+        identity = PlayerIdentity(
+            blizzard_id="c85ba8c7e122ceffbf%7C2368c23b03198901169687dcb9896b9e",
+            player_summary={},
+            battletag_input="Zed-23526",
+        )
+
+        with pytest.raises(ParserBlizzardError) as exc_info:
+            await svc._handle_player_exceptions(error, "Zed-23526", identity)
+
+        assert exc_info.value.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        assert exc_info.value.message == "Player profile is private or unavailable"
+        cache.set_player_status.assert_not_awaited()
+        cache.delete_player_status.assert_awaited_once_with(identity.blizzard_id)
 
     @pytest.mark.asyncio
     async def test_parser_parsing_error_other_raises_parser_internal_error(self):
@@ -493,6 +540,9 @@ class TestExecutePlayerRequest:
             )
 
         assert result == {"from": "blizzard"}
+        cast("Any", svc.cache).delete_player_status.assert_awaited_once_with(
+            "abc123|def456"
+        )
 
     @pytest.mark.asyncio
     async def test_stale_profile_enqueues_refresh(self):

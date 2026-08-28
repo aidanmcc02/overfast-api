@@ -1,7 +1,7 @@
 """Common utilities for Blizzard HTML/JSON parsing"""
 
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
@@ -15,15 +15,14 @@ if TYPE_CHECKING:
 _HTTP_504 = 504
 
 
-def build_blizzard_url(path: str, segment: str) -> str:
-    """Build a Blizzard request URL, percent-quoting a user-supplied segment.
+def normalize_blizzard_id(blizzard_id: str) -> str:
+    """Return the canonical URL-encoded form of a Blizzard player identifier."""
+    return quote(unquote(blizzard_id), safe="")
 
-    Blizzard IDs are already %7C-encoded (see extract_blizzard_id_from_url), so
-    that's normalized back to "|" first -- otherwise quote() would re-escape the
-    literal "%" and double-encode it (e.g. "%7C" -> "%257C").
-    """
-    quoted_segment = quote(segment.replace("%7C", "|"), safe="")
-    return f"{settings.blizzard_host}{path}/{quoted_segment}/"
+
+def build_blizzard_url(path: str, segment: str) -> str:
+    """Build a Blizzard request URL with exactly one layer of percent-encoding."""
+    return f"{settings.blizzard_host}{path}/{normalize_blizzard_id(segment)}/"
 
 
 def validate_response_status(
@@ -86,18 +85,7 @@ def safe_get_attribute(
 
 
 def extract_blizzard_id_from_url(url: str) -> str | None:
-    """Extract Blizzard ID from career profile URL (keeps URL-encoded format).
-
-    Blizzard redirects BattleTag URLs to Blizzard ID URLs. The ID is kept
-    in URL-encoded format to match the format used in search results.
-
-    Examples:
-        - Input: /career/df51a381fe20caf8baa7%7C0bf3b4c47cbebe84b8db9c676a4e9c1f/
-        - Output: df51a381fe20caf8baa7%7C0bf3b4c47cbebe84b8db9c676a4e9c1f
-
-    Returns:
-        Blizzard ID string (URL-encoded), or None if not found
-    """
+    """Extract and normalize the Blizzard ID from a career profile URL."""
     if "/career/" not in url:
         return None
 
@@ -111,39 +99,25 @@ def extract_blizzard_id_from_url(url: str) -> str | None:
         logger.warning("Failed to extract Blizzard ID from URL: {}", url)
         return None
 
-    return blizzard_id
+    return normalize_blizzard_id(blizzard_id)
 
 
 def is_blizzard_id(player_id: str) -> bool:
-    """Check if a player_id is a Blizzard ID (not a BattleTag).
-
-    Blizzard IDs contain pipe character (| or %7C) and don't have hyphens.
-    BattleTags have format: Name-12345
-
-    Examples:
-        >>> is_blizzard_id("TeKrop-2217")
-        False
-        >>> is_blizzard_id("df51a381fe20caf8baa7%7C0bf3b4c47cbebe84b8db9c676a4e9c1f")
-        True
-        >>> is_blizzard_id("df51a381fe20caf8baa7|0bf3b4c47cbebe84b8db9c676a4e9c1f")
-        True
-    """
-    return ("%7C" in player_id or "|" in player_id) and "-" not in player_id
+    """Check if a player_id is a Blizzard ID rather than a BattleTag."""
+    return "|" in unquote(player_id) and "-" not in player_id
 
 
 def match_player_by_blizzard_id(
     search_results: list[dict], blizzard_id: str
 ) -> dict | None:
-    """Match a player from search results by Blizzard ID.
-
-    Used to resolve ambiguous BattleTags when multiple players share the same name.
-
-    Returns:
-        Matching player dict, or None if not found
-    """
-    normalized_blizzard_id = blizzard_id.replace("|", "%7C")  # Normalize for comparison
+    """Match a search result after canonicalizing both identifier sources."""
+    normalized_blizzard_id = normalize_blizzard_id(blizzard_id)
     for player in search_results:
-        if player.get("url") == normalized_blizzard_id:
+        candidate = player.get("url")
+        if (
+            isinstance(candidate, str)
+            and normalize_blizzard_id(candidate) == normalized_blizzard_id
+        ):
             return player
 
     logger.warning(
