@@ -266,6 +266,8 @@ class PlayerService(BaseService):
                 effective_id = identity.blizzard_id or player_id
                 html = await self._get_player_html(effective_id, identity)
                 data = data_factory(html, identity.player_summary)
+                # A successful live parse proves any prior negative resolution stale.
+                await self.cache.delete_player_status(effective_id)
 
         except Exception as exc:  # noqa: BLE001
             await self._handle_player_exceptions(exc, player_id, identity)
@@ -633,9 +635,18 @@ class PlayerService(BaseService):
         effective_id = identity.blizzard_id or player_id
         battletag_input = identity.battletag_input
         player_summary = identity.player_summary
+        resolved_by_redirect = bool(
+            identity.blizzard_id and is_blizzard_id(identity.blizzard_id)
+        )
 
         if isinstance(error, ParserBlizzardError):
             if error.status_code == HTTPStatus.NOT_FOUND.value:
+                if player_summary or resolved_by_redirect:
+                    await self.cache.delete_player_status(effective_id)
+                    raise ParserBlizzardError(
+                        status_code=HTTPStatus.UNPROCESSABLE_ENTITY.value,
+                        message="Player profile is private or unavailable",
+                    ) from error
                 await self._mark_player_unknown(
                     effective_id, error, battletag=battletag_input
                 )
@@ -643,6 +654,12 @@ class PlayerService(BaseService):
 
         if isinstance(error, ParserParsingError):
             if "Could not find main content in HTML" in str(error):
+                if player_summary or resolved_by_redirect:
+                    await self.cache.delete_player_status(effective_id)
+                    raise ParserBlizzardError(
+                        status_code=HTTPStatus.UNPROCESSABLE_ENTITY.value,
+                        message="Player profile is private or unavailable",
+                    ) from error
                 not_found = ParserBlizzardError(
                     status_code=HTTPStatus.NOT_FOUND.value,
                     message="Player not found",
