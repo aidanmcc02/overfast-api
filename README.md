@@ -71,6 +71,10 @@ Should you wish to customize according to your specific requirements, here is a 
 - `APP_BASE_URL` : Base URL for exposed links in endpoints like player search and maps listing.
 - `TRUSTED_PROXY_CIDRS`: Comma-separated CIDRs of upstream proxies allowed to set `X-Forwarded-For` (e.g. `10.0.0.0/8,172.16.0.0/12`). Empty by default, meaning rate limits key on the TCP peer address. See the warning in the [production section](#-run-for-production).
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: PostgreSQL connection settings for persistent storage. `POSTGRES_PASSWORD` has no default and **must** be set in `.env`, docker compose will refuse to start otherwise.
+- `TRACKED_PLAYER_POLLING_ENABLED`: Enable Taskiq polling for explicitly tracked players (default `true`).
+- `TRACKED_PLAYER_POLLING_INTERVAL`: Poll-cycle interval in seconds (default `120`).
+- `TRACKED_PLAYER_TRACKING_TTL`: Registration lifetime in seconds; Diana must renew before it expires (default `900`).
+- `TRACKED_PLAYER_API_KEY`: Shared bearer token required by the hidden internal tracking-registration endpoint. Use the same value as Diana's `OVERFAST_TRACKING_TOKEN`.
 
 You likely won't need to modify other generic settings, but if you're curious about their functionality, consult the docstrings within the `app/config.py` file for further details.
 
@@ -195,6 +199,8 @@ sequenceDiagram
 
 Player profiles follow the same SWR logic, with the addition that parsed profile data is persisted in **PostgreSQL**. The worker compares the current `lastUpdated` value from the Blizzard search endpoint before deciding whether to re-parse the HTML.
 
+Actively tracked players are separate from historical `player_profiles` rows. Trusted services register or renew a player with `POST /internal/tracked-players/{player_id}` and `Authorization: Bearer <TRACKED_PLAYER_API_KEY>`. Registrations expire after `TRACKED_PLAYER_TRACKING_TTL`; the endpoint is excluded from OpenAPI and fails closed when no key is configured. The Taskiq scheduler reads only unexpired registrations every `TRACKED_PLAYER_POLLING_INTERVAL` seconds and enqueues the existing `refresh_player_profile` worker task. It never performs Blizzard requests itself. Valkey's existing atomic job key deduplicates scheduled and SWR-triggered refreshes.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -261,11 +267,12 @@ taskiq scheduler app.adapters.tasks.worker:scheduler
 - `refresh_heroes`, `refresh_hero`, `refresh_roles`, `refresh_maps`, `refresh_gamemodes`
 - `refresh_player_profile`
 
-**Scheduled cron tasks**:
+**Scheduled tasks**:
+- `poll_tracked_players` — every `TRACKED_PLAYER_POLLING_INTERVAL` seconds (default 120); enqueues active players only
 - `cleanup_stale_players` — daily at 03:00 UTC (removes expired profiles from PostgreSQL)
 - `check_new_hero` — daily at 02:00 UTC (detects newly released heroes)
 
-The broker is a custom `ValkeyListBroker` backed by Valkey lists. Deduplication is handled by `ValkeyTaskQueue`, which uses `SET NX` so the same entity (e.g. a player battletag) is never enqueued twice for the same task type.
+The broker is a custom `ValkeyListBroker` backed by Valkey lists. Deduplication is handled by `ValkeyTaskQueue`, which uses `SET NX` so the same entity (e.g. a player battletag) is never enqueued twice across scheduled polling and SWR refreshes.
 
 ```mermaid
 flowchart LR

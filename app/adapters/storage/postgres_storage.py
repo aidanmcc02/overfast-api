@@ -250,6 +250,32 @@ class PostgresStorage(metaclass=Singleton):
                 data_version,
             )
 
+    @track_storage_operation("tracked_players", "set")
+    async def track_player(self, player_id: str, ttl_seconds: int) -> None:
+        """Register or renew a player for active background polling."""
+        async with self._pool.acquire() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                """INSERT INTO tracked_players (player_id, renewed_at, expires_at)
+                   VALUES ($1, NOW(), NOW() + $2 * INTERVAL '1 second')
+                   ON CONFLICT (player_id) DO UPDATE
+                   SET renewed_at = NOW(),
+                       expires_at = NOW() + $2 * INTERVAL '1 second'""",
+                player_id,
+                ttl_seconds,
+            )
+
+    @track_storage_operation("tracked_players", "get")
+    async def get_tracked_player_ids(self) -> list[str]:
+        """Return active tracked IDs and remove expired registrations."""
+        async with self._pool.acquire() as conn:  # type: ignore[union-attr]
+            await conn.execute("DELETE FROM tracked_players WHERE expires_at <= NOW()")
+            rows = await conn.fetch(
+                """SELECT player_id FROM tracked_players
+                   WHERE expires_at > NOW()
+                   ORDER BY player_id"""
+            )
+        return [row["player_id"] for row in rows]
+
     # ------------------------------------------------------------------ #
     # Maintenance
     # ------------------------------------------------------------------ #
@@ -276,7 +302,7 @@ class PostgresStorage(metaclass=Singleton):
     async def clear_all_data(self) -> None:
         """Truncate all tables (for testing)."""
         async with self._pool.acquire() as conn:  # type: ignore[union-attr]
-            await conn.execute("TRUNCATE static_data, player_profiles")
+            await conn.execute("TRUNCATE static_data, player_profiles, tracked_players")
 
     # ------------------------------------------------------------------ #
     # Statistics

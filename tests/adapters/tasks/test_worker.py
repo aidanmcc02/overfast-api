@@ -2,7 +2,7 @@
 
 import contextlib
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -10,6 +10,7 @@ from app.adapters.tasks.worker import (
     _run_refresh_task,
     check_new_hero,
     cleanup_stale_players,
+    poll_tracked_players,
     refresh_gamemodes,
     refresh_hero,
     refresh_heroes,
@@ -18,6 +19,7 @@ from app.adapters.tasks.worker import (
     refresh_roles,
 )
 from app.domain.enums import HeroKey, Locale
+from app.domain.ports import EnqueueResult
 
 
 @pytest.fixture(autouse=True)
@@ -33,10 +35,23 @@ def mock_worker_metrics():
         patch(
             "app.adapters.tasks.worker.background_tasks_duration_seconds"
         ) as mock_duration,
+        patch(
+            "app.adapters.tasks.worker.player_profile_refresh_results_total"
+        ) as mock_player_results,
+        patch(
+            "app.adapters.tasks.worker.tracked_player_poll_cycles_total"
+        ) as mock_poll_cycles,
+        patch(
+            "app.adapters.tasks.worker.tracked_player_poll_players_total"
+        ) as mock_poll_players,
+        patch("app.adapters.tasks.worker.tracked_players_active"),
     ):
         mock_completed.labels.return_value = MagicMock()
         mock_failed.labels.return_value = MagicMock()
         mock_duration.labels.return_value = MagicMock()
+        mock_player_results.labels.return_value = MagicMock()
+        mock_poll_cycles.labels.return_value = MagicMock()
+        mock_poll_players.labels.return_value = MagicMock()
         yield mock_completed, mock_failed, mock_duration
 
 
@@ -204,6 +219,78 @@ class TestRefreshPlayerProfile:
         )
 
         mock_service.refresh_player_profile.assert_awaited_once_with("Player-1234")
+
+    @pytest.mark.asyncio
+    async def test_records_unchanged_profile_result(self):
+        mock_service = AsyncMock()
+        mock_service.refresh_player_profile.return_value = False
+        mock_queue = AsyncMock()
+
+        await cast("Any", refresh_player_profile).__wrapped__(
+            "Player-1234", mock_service, mock_queue
+        )
+
+        mock_service.refresh_player_profile.assert_awaited_once_with("Player-1234")
+
+
+class TestPollTrackedPlayers:
+    @pytest.mark.asyncio
+    async def test_enqueues_only_active_tracked_players(self):
+        mock_storage = AsyncMock()
+        mock_storage.get_tracked_player_ids.return_value = ["A-1", "B-2", "C-3"]
+        mock_queue = AsyncMock()
+        mock_queue.enqueue.side_effect = [
+            EnqueueResult.QUEUED,
+            EnqueueResult.DEDUPLICATED,
+            EnqueueResult.FAILED,
+        ]
+
+        with patch(
+            "app.adapters.tasks.worker.settings.tracked_player_polling_enabled", True
+        ):
+            await cast("Any", poll_tracked_players).__wrapped__(
+                mock_storage, mock_queue
+            )
+
+        assert mock_queue.enqueue.await_args_list == [
+            call("refresh_player_profile", job_id="A-1"),
+            call("refresh_player_profile", job_id="B-2"),
+            call("refresh_player_profile", job_id="C-3"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_player_enqueue_failure_does_not_abort_cycle(self):
+        mock_storage = AsyncMock()
+        mock_storage.get_tracked_player_ids.return_value = ["broken", "healthy"]
+        mock_queue = AsyncMock()
+        mock_queue.enqueue.side_effect = [
+            RuntimeError("Valkey unavailable"),
+            EnqueueResult.QUEUED,
+        ]
+
+        with patch(
+            "app.adapters.tasks.worker.settings.tracked_player_polling_enabled", True
+        ):
+            await cast("Any", poll_tracked_players).__wrapped__(
+                mock_storage, mock_queue
+            )
+
+        assert mock_queue.enqueue.await_count == 2  # noqa: PLR2004
+
+    @pytest.mark.asyncio
+    async def test_disabled_polling_does_not_read_storage(self):
+        mock_storage = AsyncMock()
+        mock_queue = AsyncMock()
+
+        with patch(
+            "app.adapters.tasks.worker.settings.tracked_player_polling_enabled", False
+        ):
+            await cast("Any", poll_tracked_players).__wrapped__(
+                mock_storage, mock_queue
+            )
+
+        mock_storage.get_tracked_player_ids.assert_not_awaited()
+        mock_queue.enqueue.assert_not_awaited()
 
 
 # ── cleanup_stale_players ─────────────────────────────────────────────────────

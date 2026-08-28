@@ -99,6 +99,29 @@ background_tasks_queue_size = Gauge(
     "Number of background refresh tasks currently queued or in-flight",
 )
 
+tracked_player_poll_cycles_total = Counter(
+    "tracked_player_poll_cycles_total",
+    "Tracked-player polling cycles by outcome",
+    ["outcome"],
+)
+
+tracked_player_poll_players_total = Counter(
+    "tracked_player_poll_players_total",
+    "Tracked players handled by polling enqueue outcome",
+    ["outcome"],
+)
+
+tracked_players_active = Gauge(
+    "tracked_players_active",
+    "Active unexpired tracked-player registrations in the latest poll cycle",
+)
+
+player_profile_refresh_results_total = Counter(
+    "player_profile_refresh_results_total",
+    "Player profile refresh results",
+    ["result"],
+)
+
 ########################
 # Throttle / Blizzard Metrics
 ########################

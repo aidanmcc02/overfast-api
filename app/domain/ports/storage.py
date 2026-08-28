@@ -78,6 +78,14 @@ class StoragePort(Protocol):
         """Store player profile HTML and parsed summary with optional metadata"""
         ...
 
+    async def track_player(self, player_id: str, ttl_seconds: int) -> None:
+        """Register or renew a player for active background polling."""
+        ...
+
+    async def get_tracked_player_ids(self) -> list[str]:
+        """Return player IDs whose active tracking registration has not expired."""
+        ...
+
     async def delete_old_player_profiles(self, max_age_seconds: int) -> int:
         """
         Delete player profiles not updated within max_age_seconds.

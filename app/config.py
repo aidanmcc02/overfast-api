@@ -4,6 +4,7 @@ import tomllib
 from functools import cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -216,6 +217,15 @@ class Settings(BaseSettings):
 
     # Job timeout in seconds
     worker_job_timeout: int = 300
+
+    # Actively tracked player polling
+    tracked_player_polling_enabled: bool = True
+    tracked_player_polling_interval: int = Field(default=120, ge=1)
+    tracked_player_tracking_ttl: int = Field(default=900, ge=1)
+
+    # Shared bearer token for trusted services that register tracked players.
+    # Registration is unavailable while this is empty.
+    tracked_player_api_key: str = ""
 
     ############
     # BLIZZARD

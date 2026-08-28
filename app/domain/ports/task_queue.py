@@ -1,6 +1,15 @@
 """Task queue port protocol for background job processing"""
 
+from enum import StrEnum
 from typing import Protocol
+
+
+class EnqueueResult(StrEnum):
+    """Outcome of an atomic task enqueue attempt."""
+
+    QUEUED = "queued"
+    DEDUPLICATED = "deduplicated"
+    FAILED = "failed"
 
 
 class TaskQueuePort(Protocol):
@@ -11,12 +20,12 @@ class TaskQueuePort(Protocol):
         task_name: str,
         *,
         job_id: str | None = None,
-    ) -> str:
-        """Enqueue a background task by name, returning the effective job ID.
+    ) -> EnqueueResult:
+        """Enqueue a background task and report its atomic enqueue outcome.
 
-        Implementations must silently skip the enqueue when the job is already
-        pending or running (deduplication by ``job_id``).
-        The ``job_id`` is also passed to the task as its first positional argument.
+        Implementations must skip the enqueue when the job is already pending
+        or running (deduplication by ``job_id``). The ``job_id`` is also passed
+        to the task as its first positional argument.
         """
         ...
 

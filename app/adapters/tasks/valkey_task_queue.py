@@ -11,6 +11,7 @@ from typing import Any
 
 from app.adapters.tasks.task_registry import TASK_MAP
 from app.config import settings
+from app.domain.ports.task_queue import EnqueueResult
 from app.infrastructure.logger import logger
 
 JOB_KEY_PREFIX = "worker:job:"
@@ -31,7 +32,7 @@ class ValkeyTaskQueue:
         task_name: str,
         *,
         job_id: str | None = None,
-    ) -> str:
+    ) -> EnqueueResult:
         """Dispatch a job to the taskiq worker, skipping duplicates.
 
         Uses ``SET NX`` to atomically claim the dedup slot before calling
@@ -43,7 +44,7 @@ class ValkeyTaskQueue:
         task_fn = TASK_MAP.get(task_name)
         if task_fn is None:
             logger.warning("[ValkeyTaskQueue] Unknown task: {!r}", task_name)
-            return effective_id
+            return EnqueueResult.FAILED
 
         try:
             claimed = await self._valkey.set(
@@ -54,16 +55,18 @@ class ValkeyTaskQueue:
             )
             if not claimed:
                 logger.debug("[ValkeyTaskQueue] Already queued: {}", effective_id)
-                return effective_id
+                return EnqueueResult.DEDUPLICATED
 
             await task_fn.kiq(effective_id)
             logger.debug(
                 "[ValkeyTaskQueue] Enqueued {} (job_id={})", task_name, effective_id
             )
         except Exception as exc:  # noqa: BLE001
+            await self.release_job(effective_id)
             logger.warning("[ValkeyTaskQueue] Failed to enqueue {}: {}", task_name, exc)
-
-        return effective_id
+            return EnqueueResult.FAILED
+        else:
+            return EnqueueResult.QUEUED
 
     async def is_job_pending_or_running(self, job_id: str) -> bool:
         """Return True if a job with this ID is already pending or running."""

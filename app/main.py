@@ -12,6 +12,7 @@ from app.api.responses import ASCIIJSONResponse
 from app.api.routers.docs import router as docs
 from app.api.routers.gamemodes import router as gamemodes
 from app.api.routers.heroes import router as heroes
+from app.api.routers.internal_tracked_players import router as internal_tracked_players
 from app.api.routers.maps import router as maps
 from app.api.routers.players import router as players
 from app.api.routers.roles import router as roles
@@ -125,6 +126,7 @@ if settings.prometheus_enabled:
 
 # Add application routers
 app.include_router(docs)
+app.include_router(internal_tracked_players)
 app.include_router(heroes, prefix="/heroes")
 app.include_router(roles, prefix="/roles")
 app.include_router(gamemodes, prefix="/gamemodes")

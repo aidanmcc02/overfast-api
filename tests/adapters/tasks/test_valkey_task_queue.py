@@ -7,6 +7,7 @@ import fakeredis
 import pytest
 
 from app.adapters.tasks.valkey_task_queue import ValkeyTaskQueue
+from app.domain.ports import EnqueueResult
 
 
 @pytest.fixture
@@ -28,10 +29,12 @@ class TestDeduplication:
             "app.adapters.tasks.valkey_task_queue.TASK_MAP",
             {"refresh": mock_task},
         ):
-            await queue.enqueue("refresh", job_id="job-1")
-            await queue.enqueue("refresh", job_id="job-1")
+            first = await queue.enqueue("refresh", job_id="job-1")
+            second = await queue.enqueue("refresh", job_id="job-1")
 
         mock_task.kiq.assert_awaited_once_with("job-1")
+        assert first is EnqueueResult.QUEUED
+        assert second is EnqueueResult.DEDUPLICATED
 
     @pytest.mark.asyncio
     async def test_different_job_ids_both_recorded(self, queue: ValkeyTaskQueue):
@@ -51,10 +54,10 @@ class TestDeduplication:
         assert result_b
 
     @pytest.mark.asyncio
-    async def test_returns_effective_id(self, queue: ValkeyTaskQueue):
+    async def test_reports_failed_for_unknown_task(self, queue: ValkeyTaskQueue):
         result = await queue.enqueue("refresh", job_id="job-1")
 
-        assert result == "job-1"
+        assert result is EnqueueResult.FAILED
 
     @pytest.mark.asyncio
     async def test_falls_back_to_task_name_when_no_job_id(self, queue: ValkeyTaskQueue):
@@ -68,7 +71,7 @@ class TestDeduplication:
 
         pending = await queue.is_job_pending_or_running("refresh_heroes")
 
-        assert result == "refresh_heroes"
+        assert result is EnqueueResult.QUEUED
         assert pending
 
 
@@ -128,19 +131,19 @@ class TestEnqueueTaskDispatch:
 
     @pytest.mark.asyncio
     async def test_unknown_task_skips_kiq(self, queue: ValkeyTaskQueue):
-        """An unknown task name is a no-op — returns effective_id without claiming a dedup slot."""
+        """An unknown task name reports failure without claiming a dedup slot."""
         result = await queue.enqueue("nonexistent_task", job_id="xyz")
 
         pending = await queue.is_job_pending_or_running("xyz")
 
-        assert result == "xyz"
+        assert result is EnqueueResult.FAILED
         assert not pending
 
     @pytest.mark.asyncio
     async def test_redis_exception_is_swallowed(
         self, fake_redis: fakeredis.FakeAsyncRedis
     ):
-        """If redis raises, enqueue swallows the exception and returns effective_id."""
+        """If redis raises, enqueue swallows the exception and reports failure."""
         queue = ValkeyTaskQueue(fake_redis)
         mock_task = MagicMock()
         mock_task.kiq = AsyncMock()
@@ -151,7 +154,7 @@ class TestEnqueueTaskDispatch:
         ):
             result = await queue.enqueue("refresh_heroes", job_id="boom")
 
-        assert result == "boom"
+        assert result is EnqueueResult.FAILED
 
 
 class TestIsJobPendingOrRunningExceptionHandling:

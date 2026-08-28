@@ -34,3 +34,12 @@ CREATE INDEX IF NOT EXISTS idx_player_profiles_updated_at
 CREATE INDEX IF NOT EXISTS idx_player_profiles_battletag
     ON player_profiles (battletag)
     WHERE battletag IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS tracked_players (
+    player_id   TEXT        PRIMARY KEY,
+    renewed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracked_players_expires_at
+    ON tracked_players (expires_at);

@@ -24,6 +24,7 @@ _PLAYER_SUMMARY = {
     "avatar": "https://example.com/avatar.png",
     "lastUpdated": 1700000000,
 }
+_UPDATED_LAST_UPDATED = 1700000001
 
 
 def _make_service(
@@ -705,87 +706,146 @@ class TestExecutePlayerRequest:
 
 class TestRefreshPlayerProfile:
     @pytest.mark.asyncio
-    async def test_always_calls_blizzard_even_when_profile_is_fresh(self):
-        """refresh_player_profile bypasses _get_fresh_stored_profile and always
-        fetches from Blizzard, even when the stored profile is within the
-        staleness threshold."""
+    async def test_unchanged_last_updated_skips_career_download(self):
         storage = FakeStorage()
         await storage.set_player_profile(
             "abc123|def456",
             html=_TEKROP_HTML,
             summary=_PLAYER_SUMMARY,
+            battletag="TeKrop-2217",
+            name="TeKrop",
         )
         svc = _make_service(storage=storage)
 
         with (
             patch(
-                "app.domain.services.player_service.is_blizzard_id", return_value=True
+                "app.domain.services.player_service.fetch_player_summary_json",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_search,
+            patch(
+                "app.domain.services.player_service.parse_player_summary_json",
+                return_value=_PLAYER_SUMMARY,
             ),
             patch(
                 "app.domain.services.player_service.fetch_player_html",
                 new_callable=AsyncMock,
-                return_value=(_TEKROP_HTML, "abc123|def456"),
-            ) as mock_fetch,
+            ) as mock_career,
             patch("app.domain.services.player_service.settings") as s,
         ):
-            s.player_staleness_threshold = (
-                99999  # profile would pass the fast-path check
-            )
             s.prometheus_enabled = False
-            s.career_path_cache_timeout = 300
             s.unknown_players_cache_enabled = False
-            await svc.refresh_player_profile("abc123|def456")
+            result = await svc.refresh_player_profile("TeKrop-2217")
 
-        mock_fetch.assert_awaited_once()
+        assert result is False
+        mock_search.assert_awaited_once()
+        mock_career.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_updates_persistent_storage(self):
-        """refresh_player_profile writes a fresh profile to persistent storage."""
+    async def test_changed_last_updated_downloads_and_stores_career(self):
         storage = FakeStorage()
+        await storage.set_player_profile(
+            "abc123|def456",
+            html="old-html",
+            summary=_PLAYER_SUMMARY,
+            battletag="TeKrop-2217",
+            name="TeKrop",
+        )
         svc = _make_service(storage=storage)
+        cast("Any", svc.cache).scan_keys.return_value = []
+        changed_summary = {**_PLAYER_SUMMARY, "lastUpdated": _UPDATED_LAST_UPDATED}
 
         with (
             patch(
-                "app.domain.services.player_service.is_blizzard_id", return_value=True
+                "app.domain.services.player_service.fetch_player_summary_json",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "app.domain.services.player_service.parse_player_summary_json",
+                return_value=changed_summary,
             ),
             patch(
                 "app.domain.services.player_service.fetch_player_html",
                 new_callable=AsyncMock,
                 return_value=(_TEKROP_HTML, "abc123|def456"),
+            ) as mock_career,
+            patch("app.domain.services.player_service.settings") as s,
+        ):
+            s.prometheus_enabled = False
+            s.unknown_players_cache_enabled = False
+            s.api_cache_key_prefix = "api-cache"
+            result = await svc.refresh_player_profile("TeKrop-2217")
+
+        profile = await storage.get_player_profile("abc123|def456")
+        assert result is True
+        assert profile is not None
+        assert profile["summary"]["lastUpdated"] == _UPDATED_LAST_UPDATED
+        mock_career.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_private_player_remains_refreshable_when_public_again(self):
+        storage = FakeStorage()
+        await storage.set_player_profile(
+            "abc123|def456",
+            html="old-html",
+            summary=_PLAYER_SUMMARY,
+            battletag="TeKrop-2217",
+            name="TeKrop",
+        )
+        svc = _make_service(storage=storage)
+        cast("Any", svc.cache).scan_keys.return_value = []
+        changed_summary = {**_PLAYER_SUMMARY, "lastUpdated": _UPDATED_LAST_UPDATED}
+        private_error = ParserBlizzardError(
+            status.HTTP_404_NOT_FOUND, "Player not found"
+        )
+
+        with (
+            patch(
+                "app.domain.services.player_service.fetch_player_summary_json",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "app.domain.services.player_service.parse_player_summary_json",
+                return_value=changed_summary,
+            ),
+            patch(
+                "app.domain.services.player_service.fetch_player_html",
+                new_callable=AsyncMock,
+                side_effect=[
+                    private_error,
+                    (_TEKROP_HTML, "abc123|def456"),
+                ],
             ),
             patch("app.domain.services.player_service.settings") as s,
         ):
-            s.player_staleness_threshold = 3600
             s.prometheus_enabled = False
-            s.career_path_cache_timeout = 300
             s.unknown_players_cache_enabled = False
-            await svc.refresh_player_profile("abc123|def456")
+            s.api_cache_key_prefix = "api-cache"
+            with pytest.raises(ParserBlizzardError) as exc_info:
+                await svc.refresh_player_profile("TeKrop-2217")
 
-        profile = await storage.get_player_profile("abc123|def456")
-        assert profile is not None
+            result = await svc.refresh_player_profile("TeKrop-2217")
+
+        assert exc_info.value.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_blizzard_error_propagates(self):
-        """A ParserBlizzardError from identity resolution is re-raised as-is by
-        _handle_player_exceptions — the worker's _run_refresh_task except block
-        captures it."""
         svc = _make_service()
-        err = ParserBlizzardError(
+        error = ParserBlizzardError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "Blizzard unavailable"
         )
 
         with (
             patch(
-                "app.domain.services.player_service.is_blizzard_id", return_value=False
-            ),
-            patch(
                 "app.domain.services.player_service.fetch_player_summary_json",
                 new_callable=AsyncMock,
-                side_effect=err,
+                side_effect=error,
             ),
             patch("app.domain.services.player_service.settings") as s,
         ):
-            s.player_staleness_threshold = 3600
             s.prometheus_enabled = False
             s.unknown_players_cache_enabled = False
             with pytest.raises(ParserBlizzardError) as exc_info:
