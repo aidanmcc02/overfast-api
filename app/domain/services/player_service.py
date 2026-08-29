@@ -127,29 +127,27 @@ class PlayerService(BaseService):
     # Background refresh  (worker only — bypasses storage fast-path)
     # ------------------------------------------------------------------
 
-    async def refresh_player_profile(self, player_id: str) -> None:
-        """Unconditionally fetch fresh player data from Blizzard and persist it.
+    async def refresh_player_profile(self, player_id: str) -> bool:
+        """Check Blizzard and persist a changed player profile.
 
-        Unlike the public endpoint methods, this method bypasses
-        ``_get_fresh_stored_profile`` entirely, so the worker always
-        issues a live Blizzard request regardless of how recently the
-        profile was last stored.  This prevents the background refresh
-        task from silently no-oping when the stored profile is still
-        within the staleness threshold.
+        The live search summary is fetched even when PostgreSQL data is fresh.
+        Its ``lastUpdated`` value is compared with the stored summary so an
+        unchanged profile avoids the career-page download and parsing path.
 
-        After updating persistent storage, all existing API cache keys for this
-        player are deleted.  The next request will find a cache miss, hit the
-        storage fast-path (profile is now fresh), compute the correct data slice,
-        and repopulate the cache — without touching Blizzard.
+        Returns ``True`` when fresh career HTML was fetched and stored.
         """
         identity = PlayerIdentity()
         try:
-            identity = await self._resolve_player_identity(player_id)
+            identity = await self._resolve_refresh_identity(player_id)
             effective_id = identity.blizzard_id or player_id
-            await self._get_player_html(effective_id, identity, force_update=True)
-            await self._evict_player_cache_keys(player_id)
+            _, changed = await self._get_player_html(
+                effective_id, identity, force_update=True
+            )
+            if changed:
+                await self._evict_player_cache_keys(player_id)
         except Exception as exc:  # noqa: BLE001
             await self._handle_player_exceptions(exc, player_id, identity)
+        return changed
 
     async def _evict_player_cache_keys(self, player_id: str) -> None:
         """Delete all API cache keys for *player_id* from Valkey.
@@ -264,7 +262,7 @@ class PlayerService(BaseService):
             else:
                 identity = await self._resolve_player_identity(player_id)
                 effective_id = identity.blizzard_id or player_id
-                html = await self._get_player_html(effective_id, identity)
+                html, _ = await self._get_player_html(effective_id, identity)
                 data = data_factory(html, identity.player_summary)
                 # A successful live parse proves any prior negative resolution stale.
                 await self.cache.delete_player_status(effective_id)
@@ -394,8 +392,8 @@ class PlayerService(BaseService):
         identity: PlayerIdentity,
         *,
         force_update: bool = False,
-    ) -> str:
-        """Return player HTML, always storing fresh HTML in persistent storage.
+    ) -> tuple[str, bool]:
+        """Return player HTML and whether fresh career HTML was downloaded.
 
         Priority order:
         1. ``identity.cached_html`` — fetched during identity resolution; store and return.
@@ -417,7 +415,7 @@ class PlayerService(BaseService):
                 identity.battletag_input,
                 name,
             )
-            return identity.cached_html
+            return identity.cached_html, True
 
         player_cache = await self.get_player_profile_cache(effective_id)
         if (
@@ -437,7 +435,7 @@ class PlayerService(BaseService):
                     identity.battletag_input,
                     player_cache.get("name"),
                 )
-            return html
+            return html, False
 
         html, _ = await fetch_player_html(self.blizzard_client, effective_id)
         name = extract_name_from_profile_html(html) or identity.player_summary.get(
@@ -450,11 +448,38 @@ class PlayerService(BaseService):
             identity.battletag_input,
             name,
         )
-        return html
+        return html, True
 
     # ------------------------------------------------------------------
     # Identity resolution
     # ------------------------------------------------------------------
+
+    async def _resolve_refresh_identity(self, player_id: str) -> PlayerIdentity:
+        """Resolve a refresh without fetching career HTML when storage can seed search."""
+        if not is_blizzard_id(player_id):
+            return await self._resolve_player_identity(player_id)
+
+        stored = await self.storage.get_player_profile(player_id)
+        if stored:
+            summary = stored.get("summary") or {}
+            search_term = (
+                stored.get("battletag") or stored.get("name") or summary.get("username")
+            )
+            if search_term:
+                search_json = await fetch_player_summary_json(
+                    self.blizzard_client, search_term
+                )
+                player_summary = parse_player_summary_json(
+                    search_json, search_term, player_id
+                )
+                if player_summary:
+                    return PlayerIdentity(
+                        blizzard_id=player_id,
+                        player_summary=player_summary,
+                        battletag_input=stored.get("battletag"),
+                    )
+
+        return await self._resolve_player_identity(player_id)
 
     async def _resolve_player_identity(self, player_id: str) -> PlayerIdentity:
         """Resolve BattleTag or Blizzard ID to a canonical ``PlayerIdentity``."""

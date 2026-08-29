@@ -17,13 +17,11 @@ from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
+from http import HTTPStatus
+from itertools import count
 from typing import TYPE_CHECKING, Annotated
 
 from prometheus_client import start_http_server
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
 from taskiq import TaskiqDepends, TaskiqEvents
 from taskiq.schedule_sources import LabelScheduleSource
 from taskiq.scheduler.scheduler import TaskiqScheduler
@@ -43,8 +41,14 @@ from app.api.dependencies import (
 )
 from app.config import settings
 from app.domain.enums import HeroKey, Locale
+from app.domain.exceptions import ParserBlizzardError
 from app.domain.parsers.heroes import fetch_heroes_html, parse_heroes_html
-from app.domain.ports import BlizzardClientPort, StoragePort, TaskQueuePort
+from app.domain.ports import (
+    BlizzardClientPort,
+    EnqueueResult,
+    StoragePort,
+    TaskQueuePort,
+)
 from app.domain.services import (
     GamemodeService,
     HeroService,
@@ -58,7 +62,17 @@ from app.monitoring.metrics import (
     background_refresh_completed_total,
     background_refresh_failed_total,
     background_tasks_duration_seconds,
+    player_profile_refresh_results_total,
+    tracked_player_poll_cycles_total,
+    tracked_player_poll_players_total,
+    tracked_players_active,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+
+_tracked_player_poll_cycle = count(1)
 
 # ─── Broker ───────────────────────────────────────────────────────────────────
 
@@ -205,18 +219,90 @@ async def refresh_gamemodes(
 async def refresh_player_profile(
     entity_id: str, service: PlayerServiceDep, task_queue: TaskQueueDep
 ) -> None:
-    """Refresh a player career profile.
-
-    ``entity_id`` is the raw ``player_id`` string.
-    Calls :meth:`~app.domain.services.PlayerService.refresh_player_profile`
-    which bypasses the persistent-storage fast-path to guarantee a live
-    Blizzard fetch regardless of how recently the profile was stored.
-    """
-    async with _run_refresh_task("player", entity_id, task_queue):
-        await service.refresh_player_profile(entity_id)
+    """Refresh one player while preserving the shared deduplication lifecycle."""
+    try:
+        async with _run_refresh_task("player", entity_id, task_queue):
+            changed = await service.refresh_player_profile(entity_id)
+            result = "changed" if changed else "unchanged"
+            player_profile_refresh_results_total.labels(result=result).inc()
+            logger.info(
+                "[Worker] player_refresh player_id={} profile_changed={}",
+                entity_id,
+                changed,
+            )
+    except ParserBlizzardError as exc:
+        result = (
+            "private_or_unavailable"
+            if exc.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+            else "failed"
+        )
+        player_profile_refresh_results_total.labels(result=result).inc()
+        raise
 
 
 # ─── Cron tasks ───────────────────────────────────────────────────────────────
+@broker.task(
+    schedule=[
+        {
+            "interval": settings.tracked_player_polling_interval,
+            "schedule_id": "poll-tracked-players",
+        }
+    ]
+)
+async def poll_tracked_players(
+    storage: StorageDep,
+    task_queue: TaskQueueDep,
+) -> None:
+    """Enqueue one deduplicated profile refresh per active tracked player."""
+    cycle_id = next(_tracked_player_poll_cycle)
+    if not settings.tracked_player_polling_enabled:
+        tracked_player_poll_cycles_total.labels(outcome="disabled").inc()
+        logger.debug("[TrackedPlayers] poll_cycle={} disabled=true", cycle_id)
+        return
+
+    try:
+        player_ids = await storage.get_tracked_player_ids()
+    except Exception as exc:  # noqa: BLE001
+        tracked_player_poll_cycles_total.labels(outcome="failed").inc()
+        logger.warning(
+            "[TrackedPlayers] poll_cycle={} failure=storage error={!r}",
+            cycle_id,
+            exc,
+        )
+        return
+
+    tracked_players_active.set(len(player_ids))
+    counts = dict.fromkeys(EnqueueResult, 0)
+    for player_id in player_ids:
+        try:
+            outcome = await task_queue.enqueue(
+                "refresh_player_profile",
+                job_id=player_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcome = EnqueueResult.FAILED
+            logger.warning(
+                "[TrackedPlayers] poll_cycle={} player_id={} failure={!r}",
+                cycle_id,
+                player_id,
+                exc,
+            )
+        counts[outcome] += 1
+
+    tracked_player_poll_cycles_total.labels(outcome="completed").inc()
+    for outcome, outcome_count in counts.items():
+        tracked_player_poll_players_total.labels(outcome=outcome.value).inc(
+            outcome_count
+        )
+    logger.info(
+        "[TrackedPlayers] poll_cycle={} tracked={} queued={} "
+        "skipped_deduplicated={} failures={}",
+        cycle_id,
+        len(player_ids),
+        counts[EnqueueResult.QUEUED],
+        counts[EnqueueResult.DEDUPLICATED],
+        counts[EnqueueResult.FAILED],
+    )
 
 
 @broker.task(schedule=[{"cron": "0 3 * * *"}])

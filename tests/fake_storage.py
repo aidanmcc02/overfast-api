@@ -22,6 +22,7 @@ class FakeStorage:
         self._static: dict[str, dict] = {}
         self._profiles: dict[str, dict] = {}
         self._battletag_index: dict[str, str] = {}
+        self._tracked_players: dict[str, float] = {}
 
     async def initialize(self) -> None:
         pass
@@ -97,6 +98,18 @@ class FakeStorage:
         if battletag:
             self._battletag_index[battletag] = player_id
 
+    async def track_player(self, player_id: str, ttl_seconds: int) -> None:
+        self._tracked_players[player_id] = time.time() + ttl_seconds
+
+    async def get_tracked_player_ids(self) -> list[str]:
+        now = time.time()
+        self._tracked_players = {
+            player_id: expires_at
+            for player_id, expires_at in self._tracked_players.items()
+            if expires_at > now
+        }
+        return sorted(self._tracked_players)
+
     # ------------------------------------------------------------------ #
     # Maintenance
     # ------------------------------------------------------------------ #
@@ -117,6 +130,7 @@ class FakeStorage:
         self._static.clear()
         self._profiles.clear()
         self._battletag_index.clear()
+        self._tracked_players.clear()
 
     # ------------------------------------------------------------------ #
     # Statistics

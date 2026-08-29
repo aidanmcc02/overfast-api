@@ -455,3 +455,32 @@ class TestInitConnection:
             decoder=json.loads,
             schema="pg_catalog",
         )
+
+
+class TestTrackedPlayers:
+    @pytest.mark.asyncio
+    async def test_track_player_upserts_expiry(self):
+        pool, conn = _make_pool()
+        storage = _make_storage(pool=pool)
+
+        await storage.track_player("Player-1234", 900)
+
+        query, player_id, ttl_seconds = conn.execute.await_args.args
+        assert "ON CONFLICT (player_id) DO UPDATE" in query
+        assert player_id == "Player-1234"
+        assert ttl_seconds == 900  # noqa: PLR2004
+
+    @pytest.mark.asyncio
+    async def test_get_tracked_players_removes_expired_and_returns_active(self):
+        conn = _make_connection(
+            fetch_result=[{"player_id": "A-1"}, {"player_id": "B-2"}]
+        )
+        pool, conn = _make_pool(conn)
+        storage = _make_storage(pool=pool)
+
+        result = await storage.get_tracked_player_ids()
+
+        conn.execute.assert_awaited_once_with(
+            "DELETE FROM tracked_players WHERE expires_at <= NOW()"
+        )
+        assert result == ["A-1", "B-2"]
