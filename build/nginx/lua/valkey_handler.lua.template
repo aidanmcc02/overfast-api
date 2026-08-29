@@ -45,6 +45,13 @@ local function check_unknown_player(valk, uri)
 end
 
 local function handle_valkey_request()
+    -- Only safe reads participate in the response cache. Mutating requests
+    -- must reach FastAPI even if their URI happens to have a cached GET entry.
+    local method = ngx.req.get_method()
+    if method ~= "GET" and method ~= "HEAD" then
+        return ngx.exec("@fallback")
+    end
+
     if EXCLUDED_PATHS[ngx.var.uri] then
         return ngx.exec("@fallback")
     end
