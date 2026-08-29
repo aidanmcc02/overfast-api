@@ -22,6 +22,13 @@ resolver 127.0.0.11 valid=30s;
 ${PROMETHEUS_LUA_SHARED_DICT}
 ${PROMETHEUS_INIT_WORKER}
 
+# Preserve mutating request methods at the FastAPI fallback while retaining
+# the existing HEAD-as-GET behavior expected by read endpoints.
+map $request_method $upstream_method {
+  default $request_method;
+  HEAD GET;
+}
+
 server {
   listen 80;
 
@@ -105,8 +112,8 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_pass_request_headers on;
 
-    # Ensure HEAD requests are passed as GET
-    proxy_method GET;
+    # Preserve POST and other mutating methods; only HEAD is proxied as GET.
+    proxy_method $upstream_method;
   }
 
   # nginx rate limit reached
